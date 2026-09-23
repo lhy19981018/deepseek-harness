@@ -1,0 +1,69 @@
+# 放到你 fork 的仓库里：.github/workflows/build-dsh-desktop.yml
+# 然后在 GitHub 网页上 Actions -> Build DSH Desktop (Windows x64, unsigned) -> Run workflow
+#
+# 为什么要用 GitHub Actions：
+#   官方打包脚本硬性要求 Windows x64 宿主机（apps/desktop/scripts/package-target.ts:179），
+#   而本机 Windows 上的深信服 EDR 会把 pnpm 的文件操作拖慢 100-200 倍并周期性锁死。
+#   GitHub 的 windows-latest 是真 Windows、无 EDR，护栏能过。
+
+name: Build DSH Desktop (Windows x64, unsigned)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 150
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm 11.7.0
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.7.0
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build packages and web frontend
+        run: pnpm run build
+
+      - name: Write desktop build env
+        shell: bash
+        run: |
+          cat > apps/desktop/.env.windows <<'ENVEOF'
+          DSH_DESKTOP_APP_ID=com.deepseek.harness
+          DSH_DESKTOP_AUTO_UPDATE_ENV=test
+          DSH_DESKTOP_MANDATORY_UPDATE_TEST_ORIGIN=https://example.invalid
+          DSH_DESKTOP_MANDATORY_UPDATE_PROD_ORIGIN=https://example.invalid
+          DSH_DESKTOP_MANDATORY_UPDATE_CONFIG='{"allowedAuthOrigins":["https://example.invalid"]}'
+          ENVEOF
+          echo "--- .env.windows ---"
+          cat apps/desktop/.env.windows
+
+      - name: Package Windows x64 installer (unsigned)
+        run: pnpm run package:desktop:win:x64:unsigned
+
+      - name: Show produced files
+        if: always()
+        shell: bash
+        run: |
+          echo "--- unsigned-artifacts ---"
+          ls -la apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/ 2>/dev/null || echo "(目录不存在)"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: dsh-desktop-win-x64-unsigned
+          path: apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/**
+          if-no-files-found: error
+          retention-days: 14
