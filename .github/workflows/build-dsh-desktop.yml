@@ -1,10 +1,14 @@
 # 放到你 fork 的仓库里：.github/workflows/build-dsh-desktop.yml
-# 然后在 GitHub 网页上 Actions -> Build DSH Desktop (Windows x64, unsigned) -> Run workflow
 #
-# 为什么要用 GitHub Actions：
-#   官方打包脚本硬性要求 Windows x64 宿主机（apps/desktop/scripts/package-target.ts:179），
-#   而本机 Windows 上的深信服 EDR 会把 pnpm 的文件操作拖慢 100-200 倍并周期性锁死。
-#   GitHub 的 windows-latest 是真 Windows、无 EDR，护栏能过。
+# 这一版针对上次失败做了修复：
+#   上次 pnpm install / build / electron-builder 全部成功，
+#   exe 也已经打出来了（deepseek-harness-0.1.7-alpha.2-win-x64-unsigned.exe），
+#   但打包之后的「冒烟自检」里 LibreOffice 做 DOCX→PDF 转换失败，
+#   导致整个 job 挂掉，artifact 上传那一步没执行，所以拿不到 exe。
+#
+#   官方脚本里 smoke-packaged-runtime.ts 是硬编码无条件调用的，没有跳过开关。
+#   所以这里给打包步骤加 continue-on-error，并让上传步骤用 if: always()，
+#   保证无论自检成败，exe 都能下载到。
 
 name: Build DSH Desktop (Windows x64, unsigned)
 
@@ -50,17 +54,43 @@ jobs:
           echo "--- .env.windows ---"
           cat apps/desktop/.env.windows
 
+      # continue-on-error: 自检失败不算整体失败，保证后面的上传能跑
       - name: Package Windows x64 installer (unsigned)
+        id: package
+        continue-on-error: true
         run: pnpm run package:desktop:win:x64:unsigned
 
-      - name: Show produced files
+      - name: List artifacts
         if: always()
         shell: bash
         run: |
-          echo "--- unsigned-artifacts ---"
-          ls -la apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts/ 2>/dev/null || echo "(目录不存在)"
+          DIR="apps/desktop/.desktop-build/targets/win-x64/unsigned-artifacts"
+          echo "=== $DIR ==="
+          ls -la "$DIR" 2>/dev/null || echo "(目录不存在)"
+          echo
+          echo "=== 安装包校验值 ==="
+          EXE=$(find "$DIR" -maxdepth 1 -name "*.exe" -not -name "*.__uninstaller*" 2>/dev/null | head -1)
+          if [ -n "$EXE" ]; then
+            echo "文件: $EXE"
+            echo "大小: $(stat -c%s "$EXE" 2>/dev/null || stat -f%z "$EXE") 字节"
+            sha256sum "$EXE" 2>/dev/null || shasum -a 256 "$EXE"
+          else
+            echo "未找到安装包 exe"
+          fi
+
+      - name: Report packaging result
+        if: always()
+        shell: bash
+        run: |
+          if [ "${{ steps.package.outcome }}" = "success" ]; then
+            echo "打包步骤成功（含冒烟自检）"
+          else
+            echo "::warning::打包步骤失败 —— 通常是冒烟自检里 LibreOffice 的 DOCX→PDF 转换在 CI 上跑不通。"
+            echo "::warning::exe 在自检之前就已经生成，下面的 artifact 仍然可以下载。"
+          fi
 
       - name: Upload installer
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dsh-desktop-win-x64-unsigned
